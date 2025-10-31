@@ -1,35 +1,61 @@
-name: Deploy Supabase Functions
+name: Schedule check-reminder
 
 on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
+  schedule:
+    # every minute
+    - cron: "* * * * *"
+  workflow_dispatch: {}
 
 jobs:
-  deploy:
+  call-check-reminder:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
-
-      - name: Setup Deno
-        uses: denoland/setup-deno@v1
-        with:
-          deno-version: v1.x
-
-      - name: Install Supabase CLI
+      - name: POST to check-reminder (with optional service role)
+        id: call
+        env:
+          EDGE_FN_URL: https://jiduzxymmelxbpdglvib.supabase.co/functions/v1/check-reminder
+          # Optional: set SUPABASE_SERVICE_ROLE_KEY in GitHub repo secrets
+          SERVICE_ROLE: ${{ secrets.SERVICE_ROLE }}
         run: |
-          curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-          sudo apt-get install -y nodejs
-          npm install -g supabase
+          set -euo pipefail
 
-      - name: Deploy send-web-reminder
-        run: supabase functions deploy send-web-reminder --project-ref ${{ secrets.PROJECT_URL }}
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SERVICE_ROLE}}
+          url="$EDGE_FN_URL"
+          payload='{}'
 
-      - name: Deploy check-reminders
-        run: supabase functions deploy check-reminders --project-ref ${{ secrets.PROJECT_URL }}
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SERVICE_ROLE}}
+          # Build curl headers
+          headers=( -H "Content-Type: application/json" )
+          if [ -n "${SERVICE_ROLE:-}" ]; then
+            headers+=( -H "Authorization: Bearer ${SERVICE_ROLE}" )
+          fi
+
+          max_attempts=3
+          attempt=1
+          delay=2
+
+          while [ $attempt -le $max_attempts ]; do
+            echo "Attempt $attempt: POST $url"
+            http_status=$(curl -s -o /tmp/response_body -w "%{http_code}" \
+              "${headers[@]}" \
+              -X POST \
+              -d "$payload" \
+              "$url" || echo "000")
+
+            if [[ "$http_status" =~ ^2[0-9]{2}$ ]]; then
+              echo "Request succeeded with status $http_status"
+              cat /tmp/response_body
+              exit 0
+            else
+              echo "Request failed with status $http_status"
+              cat /tmp/response_body || true
+              if [ $attempt -lt $max_attempts ]; then
+                echo "Retrying in ${delay}s..."
+                sleep $delay
+                delay=$(( delay * 2 ))
+              fi
+            fi
+
+            attempt=$(( attempt + 1 ))
+          done
+
+          echo "All attempts failed."
+          exit 1
